@@ -1,81 +1,61 @@
 # Rev EaseSpline — Mac Build Instructions
 
-## What your friend needs
-- A Mac running macOS 11 (Big Sur) or later
-- Python 3.10+ installed (from https://www.python.org/downloads/macos/)
+## What you need
+- A Mac running **macOS 11 (Big Sur) or later**
+- Python 3.10+ installed (for running the build script)
 - DaVinci Resolve installed (optional, for the menu script)
 
-## Steps (send these to your friend)
+## Quick Build (on a Mac)
 
-### 1. Get the source files
-Your friend should download the `ReveaceSpline_Windows` folder from this repo.
+1. **Copy the `ReveaceSpline_Windows/mac` folder** to the Mac
+2. **Open Terminal** and navigate to it:
+   ```bash
+   cd /path/to/mac
+   ```
+3. **Make executable and run:**
+   ```bash
+   chmod +x build_mac.sh
+   ./build_mac.sh
+   ```
+4. **Done!** You'll get `ESpline_Mac.zip` in the same folder.
 
-### 2. Open Terminal
-Navigate to the `mac` folder:
-```bash
-cd /path/to/ReveaceSpline_Windows/mac
-```
+## What the build does
 
-### 3. Make the build script executable
-```bash
-chmod +x build_mac.sh
-```
+- Copies all app source files **inside** the `.app` bundle (self-contained)
+- Builds the app icon from SVG (if `rsvg-convert`, `cairosvg`, or `qlmanage` is available)
+- Creates a **self-installing launcher** — on first run it:
+  - Checks for Python 3.10+ (prompts to download if missing)
+  - Checks for PySide6 (auto-installs via pip if missing)
+  - Then launches the app
+- Installs the Resolve menu script
 
-### 4. Run the build
-```bash
-./build_mac.sh
-```
+## For End Users
 
-This will:
-- Check for Python 3.10+ and PySide6
-- Install PySide6 if missing
-- Copy app files to `~/Library/Application Support/ESpline`
-- Build `ESpline.app` (the native Mac app)
-- Install the Resolve menu script
-- Try to convert the SVG icon to `.icns`
+Just send them `ESpline_Mac.zip`. They:
 
-### 5. Icon (if automatic conversion fails)
-If the script can't convert the SVG automatically, your friend can:
-- Open `espline_logo.svg` in any image editor or Preview
-- Export as a square PNG (1024×1024)
-- Or use an online SVG→ICNS converter
-- Place the resulting `espline_logo.icns` in the `mac/` folder
-- Re-run `./build_mac.sh`
+1. Unzip it
+2. Drag `ESpline.app` to **Applications**
+3. Double-click to launch
+4. The app handles Python/PySide6 setup automatically
 
-### 6. Test it
-- Launch from **Applications** or **Launchpad**
-- Or inside DaVinci Resolve: **Workspace > Scripts > Utility > EaseSpline**
+> **First launch security warning:** macOS may say "cannot be opened because the developer cannot be verified." Right-click the app → **Open** to bypass (only needed once).
 
-### 7. Package for distribution
-```bash
-cd /path/to/ReveaceSpline_Windows/mac
-zip -r ESpline_Mac.zip ESpline.app
-```
+## Troubleshooting
 
-Then send `ESpline_Mac.zip` back to you.
+| Problem | Fix |
+|---------|-----|
+| `python3: command not found` | Install Python 3.10+ from https://www.python.org/downloads/macos/ |
+| Icon not generated | Install `librsvg`: `brew install librsvg` |
+| `chmod: cannot access` | Make sure you're in the right folder: `cd /path/to/mac` |
+| App won't open | Right-click → Open (first time only) |
 
 ## What gets installed on a user's Mac
 
 | Location | What |
 |---|---|
-| `~/Applications/ESpline.app` | The app bundle (launcher) |
-| `~/Library/Application Support/ESpline` | App source files (`main.py`, `reveace_pyside6/`, etc.) |
-| `~/Library/Application Support/Blackmagic Design/.../Utility/EaseSpline.py` | Resolve menu script |
+| `~/Applications/ESpline.app` or `/Applications/ESpline.app` | The app bundle (contains everything) |
+| `~/Library/.../Fusion/Scripts/Utility/EaseSpline.py` | Resolve menu script |
 
-## Why this approach (small download)
+## File size
 
-Instead of bundling Python + PySide6 into a 200 MB app, the Mac build uses the **same pattern as Windows**:
-- The `.app` is just a ~50 KB launcher script
-- Python and PySide6 are installed once on the user's machine
-- App updates only require replacing the small source files
-
-## Troubleshooting
-
-**"Python not found"**
-→ Install Python 3.10+ from https://www.python.org/downloads/macos/
-
-**"PySide6 install fails"**
-→ Run: `python3 -m pip install --upgrade pip` then re-run `./build_mac.sh`
-
-**"App won't open — unidentified developer"**
-→ Right-click `ESpline.app` → **Open** (first time only)
+The `.app` itself is tiny (~50 KB + source files ~500 KB) because it uses the system's Python. Much smaller than bundling Python + PySide6 (~200 MB).

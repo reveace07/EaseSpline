@@ -28,11 +28,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install PySide6
-
       - name: Install SVG converter
         run: |
           brew install librsvg
@@ -42,12 +37,6 @@ jobs:
           cd ReveaceSpline_Windows/mac
           chmod +x build_mac.sh
           ./build_mac.sh
-
-      - name: Package for distribution
-        run: |
-          cd ReveaceSpline_Windows/mac
-          zip -r ESpline_Mac.zip ESpline.app
-          ls -lh ESpline_Mac.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
