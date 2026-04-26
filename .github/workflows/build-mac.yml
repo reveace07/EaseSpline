@@ -1,0 +1,67 @@
+name: Build Mac App
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'ReveaceSpline_Windows/ESpline/**'
+      - 'ReveaceSpline_Windows/mac/**'
+      - '.github/workflows/build-mac.yml'
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.5.0)'
+        required: false
+        default: ''
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install PySide6
+
+      - name: Install SVG converter
+        run: |
+          brew install librsvg
+
+      - name: Build Mac app
+        run: |
+          cd ReveaceSpline_Windows/mac
+          chmod +x build_mac.sh
+          ./build_mac.sh
+
+      - name: Package for distribution
+        run: |
+          cd ReveaceSpline_Windows/mac
+          zip -r ESpline_Mac.zip ESpline.app
+          ls -lh ESpline_Mac.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESpline_Mac
+          path: ReveaceSpline_Windows/mac/ESpline_Mac.zip
+
+      - name: Create Release
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          name: Rev EaseSpline ${{ github.event.inputs.version }} (Mac)
+          files: ReveaceSpline_Windows/mac/ESpline_Mac.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

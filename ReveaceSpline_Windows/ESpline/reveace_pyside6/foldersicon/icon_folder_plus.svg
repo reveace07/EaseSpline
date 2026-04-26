@@ -1,0 +1,8 @@
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Folder body -->
+  <path d="M20 6h-8l-2-2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2z" 
+        fill="#606060" stroke="#606060" stroke-width="1.5"/>
+  <!-- Plus sign -->
+  <line x1="12" y1="10" x2="12" y2="16" stroke="#1a1a1a" stroke-width="2" stroke-linecap="round"/>
+  <line x1="9" y1="13" x2="15" y2="13" stroke="#1a1a1a" stroke-width="2" stroke-linecap="round"/>
+</svg>

@@ -1,0 +1,12 @@
+{
+  "dark_mode": true,
+  "design_style": "brutalist",
+  "border_radius": 10,
+  "current_theme": "Cyan",
+  "shadow_enabled": true,
+  "border_width": 3,
+  "highlight_border_width": 1,
+  "slider_handle": "none",
+  "custom_color": "#140804",
+  "resolve_path": "C:/Program Files/Blackmagic Design/DaVinci Resolve"
+}

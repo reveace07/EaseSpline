@@ -1,0 +1,6 @@
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Flat top, point facing down -->
+  <polygon points="7,2 17,2 12,9" fill="currentColor"/>
+  <!-- Vertical stem from point of triangle down -->
+  <line x1="12" y1="9" x2="12" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+</svg>

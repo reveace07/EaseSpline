@@ -1,0 +1,46 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+
+# ── Build / Dist ──
+build/
+dist/
+*.egg-info/
+*.egg
+
+# ── PyInstaller ──
+*.spec.bak
+
+# ── Node ──
+node_modules/
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── Logs ──
+*.log
+
+# ── User data (don't commit personal settings) ──
+activation.json
+favorites.json
+favorites_folders.json
+*.json.backup
+python_path.txt
+espline_location.txt
+launch.vbs
+run_debug.bat

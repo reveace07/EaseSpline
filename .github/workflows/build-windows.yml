@@ -1,0 +1,130 @@
+name: Build Windows App
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'ReveaceSpline_Windows/ESpline/**'
+      - 'ReveaceSpline_Windows/setup_builder/**'
+      - '.github/workflows/build-windows.yml'
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.5.0)'
+        required: false
+        default: ''
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+
+      - name: Install Node dependencies
+        run: |
+          cd ReveaceSpline_Windows/setup_builder
+          npm install sharp --no-save
+
+      - name: Build icon from SVG
+        run: |
+          cd ReveaceSpline_Windows/setup_builder
+          node -e "
+          const sharp = require('sharp');
+          const sizes = [16, 24, 32, 48, 64, 96, 128, 256];
+          Promise.all(sizes.map(s => 
+            sharp('../ESpline/reveace_pyside6/espline_logo.svg')
+              .resize(s, s, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+              .png()
+              .toFile('logo_' + s + '.png')
+          )).then(() => {
+            console.log('PNGs done');
+            process.exit(0);
+          });
+          "
+          python -c "
+          import struct, os
+          sizes = [16, 24, 32, 48, 64, 96, 128, 256]
+          base = '.'
+          pngs = []
+          for s in sizes:
+              path = os.path.join(base, f'logo_{s}.png')
+              with open(path, 'rb') as f:
+                  data = f.read()
+              pngs.append((s, data))
+          num = len(pngs)
+          header = struct.pack('<HHH', 0, 1, num)
+          offset = 6 + 16 * num
+          entries = b''
+          images = b''
+          for size, data in pngs:
+              w = size if size < 256 else 0
+              h = size if size < 256 else 0
+              entry = struct.pack('<BBBBHHII', w, h, 0, 0, 1, 32, len(data), offset)
+              entries += entry
+              images += data
+              offset += len(data)
+          with open('espline_logo.ico', 'wb') as f:
+              f.write(header + entries + images)
+          print('ICO rebuilt')
+          "
+
+      - name: Build launcher EXE
+        run: |
+          cd ReveaceSpline_Windows/setup_builder
+          pyinstaller ESpline_Launcher.spec --noconfirm --clean
+
+      - name: Copy launcher to dist
+        run: |
+          Copy-Item -Path "ReveaceSpline_Windows/setup_builder/dist/ESpline.exe" -Destination "dist/ESpline.exe" -Force
+
+      - name: Build setup installer EXE
+        run: |
+          cd ReveaceSpline_Windows/setup_builder
+          pyinstaller ESpline_Setup.spec --noconfirm --clean
+
+      - name: Copy setup to dist
+        run: |
+          Copy-Item -Path "ReveaceSpline_Windows/setup_builder/dist/ESpline_Setup.exe" -Destination "dist/ESpline_Setup.exe" -Force
+
+      - name: List outputs
+        run: |
+          Get-ChildItem dist | Select-Object Name, @{N='SizeMB';E={[math]::Round($_.Length/1MB,1)}}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESpline_Windows
+          path: |
+            dist/ESpline.exe
+            dist/ESpline_Setup.exe
+
+      - name: Create Release
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          name: Rev EaseSpline ${{ github.event.inputs.version }} (Windows)
+          files: |
+            dist/ESpline.exe
+            dist/ESpline_Setup.exe
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

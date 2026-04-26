@@ -1,0 +1,147 @@
+name: Build All Platforms
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v1.5.0)'
+        required: true
+        default: 'v1.5.0'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          cd ReveaceSpline_Windows/setup_builder
+          npm install sharp --no-save
+
+      - name: Build icon
+        run: |
+          cd ReveaceSpline_Windows/setup_builder
+          node -e "
+          const sharp = require('sharp');
+          const sizes = [16, 24, 32, 48, 64, 96, 128, 256];
+          Promise.all(sizes.map(s => 
+            sharp('../ESpline/reveace_pyside6/espline_logo.svg')
+              .resize(s, s, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+              .png()
+              .toFile('logo_' + s + '.png')
+          )).then(() => { console.log('PNGs done'); process.exit(0); });
+          "
+          python -c "
+          import struct, os
+          sizes = [16, 24, 32, 48, 64, 96, 128, 256]
+          pngs = [(s, open(f'logo_{s}.png','rb').read()) for s in sizes]
+          num = len(pngs)
+          header = struct.pack('<HHH', 0, 1, num)
+          offset = 6 + 16 * num
+          entries = b''
+          images = b''
+          for s, data in pngs:
+              w = s if s < 256 else 0
+              h = s if s < 256 else 0
+              entries += struct.pack('<BBBBHHII', w, h, 0, 0, 1, 32, len(data), offset)
+              images += data
+              offset += len(data)
+          with open('espline_logo.ico', 'wb') as f:
+              f.write(header + entries + images)
+          print('ICO rebuilt')
+          "
+
+      - name: Build launcher
+        run: |
+          cd ReveaceSpline_Windows/setup_builder
+          pyinstaller ESpline_Launcher.spec --noconfirm --clean
+          Copy-Item -Path "dist/ESpline.exe" -Destination "../../dist/ESpline.exe" -Force
+
+      - name: Build setup
+        run: |
+          cd ReveaceSpline_Windows/setup_builder
+          pyinstaller ESpline_Setup.spec --noconfirm --clean
+          Copy-Item -Path "dist/ESpline_Setup.exe" -Destination "../../dist/ESpline_Setup.exe" -Force
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESpline_Windows_${{ github.event.inputs.version }}
+          path: dist/ESpline*.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install PySide6
+          brew install librsvg
+
+      - name: Build Mac app
+        run: |
+          cd ReveaceSpline_Windows/mac
+          chmod +x build_mac.sh
+          ./build_mac.sh
+
+      - name: Package Mac app
+        run: |
+          cd ReveaceSpline_Windows/mac
+          zip -r ESpline_Mac.zip ESpline.app
+
+      - name: Upload Mac artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESpline_Mac_${{ github.event.inputs.version }}
+          path: ReveaceSpline_Windows/mac/ESpline_Mac.zip
+
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ESpline_Windows_${{ github.event.inputs.version }}
+          path: ./windows
+
+      - name: Download Mac artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ESpline_Mac_${{ github.event.inputs.version }}
+          path: ./mac
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          name: Rev EaseSpline ${{ github.event.inputs.version }}
+          files: |
+            windows/ESpline.exe
+            windows/ESpline_Setup.exe
+            mac/ESpline_Mac.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

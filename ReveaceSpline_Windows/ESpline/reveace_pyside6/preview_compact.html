@@ -1,0 +1,1313 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+*{margin:0;padding:0}
+html,body,canvas{width:100%;height:100%;overflow:hidden;display:block}
+body{background:#1c1c1a}
+canvas{cursor:crosshair}
+</style>
+<script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+<base target="_blank">
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+var bridge=null;
+if(typeof qt!=='undefined'){
+  new QWebChannel(qt.webChannelTransport,function(ch){
+    bridge=ch.objects.bridge;
+    if(bridge&&bridge.jsReady)bridge.jsReady();
+  });
+}
+
+var c=document.getElementById('c'), g=c.getContext('2d');
+var AC='#C5FD04', BG='#1c1c1a';
+var mode='bezier';
+var rh={t:.33,v:0}, lh={t:.67,v:1};
+var ep={amp:1,dur:1,dx:.5,dy:.5,hg:0.5};
+var bp={b:.5,amp:1,grav:1,dx:.5,dy:.5,hg:0};
+var vr={s:0,e:1};
+var curveDir='out';  // 'out' or 'in' - controls curve direction
+var zoom=1, panX=0, panY=0, PAD=30;
+var drag=null, isPan=false, px0=0, py0=0, ox0=0, oy0=0;
+var shift=false, ctrl=false, space=false;
+var raf=null;
+
+// Elastic/Bounce physics state
+var isManualEdit = false;
+var pathData = [];
+var keyframesRef = [];
+var dragStartState = [];
+var activeHandle = null;
+var isDragging = false;
+var selectedPoint = null;  // Track clicked point for handle visibility
+var globalEditType = null; // 'peak' or 'valley' when shift/ctrl dragging
+const MIN_OFFSET = 0.005;
+const dpr = window.devicePixelRatio || 1;
+
+function resize(){c.width=window.innerWidth||360;c.height=window.innerHeight||240;draw();}
+resize();
+window.addEventListener('resize',resize);
+
+window.addEventListener('keydown',function(e){
+  if(e.key==='Shift')shift=true;
+  if(e.key==='Control')ctrl=true;
+  if(e.key===' '&&!space){space=true;c.style.cursor='grab';}
+});
+window.addEventListener('keyup',function(e){
+  if(e.key==='Shift')shift=false;
+  if(e.key==='Control')ctrl=false;
+  if(e.key===' '){space=false;c.style.cursor='crosshair';}
+});
+window.addEventListener('blur',function(){shift=false;ctrl=false;space=false;c.style.cursor='crosshair';});
+
+var flipEnabled=false;
+function setFlipEnabled(v){flipEnabled=v;draw();}
+function flip(){
+    var autoFlip = (vr.s>vr.e);
+    if (mode === 'bezier') {
+        // Bezier ts() already follows keypoint direction via mn/mx normalization.
+        // flipEnabled=true means follow keypoints (no extra flip).
+        // flipEnabled=false means fixed lower-left to top-right (flip back when start>end).
+        return !flipEnabled && autoFlip;
+    }
+    // Physics raw data is fixed. flipEnabled=true means follow keypoints.
+    return flipEnabled && autoFlip;
+}
+
+function mouseXY(e){
+  var r=c.getBoundingClientRect();
+  return{x:e.clientX-r.left, y:e.clientY-r.top};
+}
+
+// Bezier value range — expands to ±1.5 virtual range when start=end (flat)
+var FLAT_HALF = 1.5;
+function bezierVRange(){
+  var diff = vr.e - vr.s;
+  if(Math.abs(diff) < 0.0001){
+    return {mn: vr.s - FLAT_HALF, mx: vr.s + FLAT_HALF};
+  }
+  return {mn: Math.min(vr.s, vr.e), mx: Math.max(vr.s, vr.e)};
+}
+// Map a normalized handle value [0,1] → actual value space.
+// Flat case uses bezierVRange (virtual ±1.5). Non-flat preserves direction.
+function bvRv(hv){
+  var diff = vr.e - vr.s;
+  if(Math.abs(diff) < 0.0001){ var b=bezierVRange(); return b.mn+hv*(b.mx-b.mn); }
+  return vr.s + hv * diff;
+}
+// Inverse: actual value → normalized [0,1]
+function bvRvInv(v){
+  var diff = vr.e - vr.s;
+  if(Math.abs(diff) < 0.0001){ var b=bezierVRange(); return (v-b.mn)/(b.mx-b.mn); }
+  return (v - vr.s) / diff;
+}
+
+// graph (t,v) -> screen
+function ts(t,v){
+  var W=c.width,H=c.height,gw=W-PAD*2,gh=H-PAD*2;
+  var nv;
+  if (mode === 'bezier') {
+      var diff=vr.e-vr.s;
+      if(Math.abs(diff)<0.0001){var bvr=bezierVRange();nv=(v-bvr.mn)/(bvr.mx-bvr.mn);}
+      else{var mn=Math.min(vr.s,vr.e),mx=Math.max(vr.s,vr.e);nv=(v-mn)/(mx-mn||1);}
+  } else {
+      var isFlat=Math.abs(vr.e-vr.s)<0.0001;
+      if(isFlat && mode==='bounce'){
+          // Valleys (v=1) at center, peaks go upward: nv = 0.5 + (1-v)*0.5
+          nv=0.5+(1.0-v)*0.5;
+      } else {
+          nv=v;
+      }
+  }
+  if(flip())nv=1-nv;
+  var lx=PAD+t*gw, ly=PAD+gh-nv*gh;
+  return{x:lx*zoom+panX, y:ly*zoom+panY};
+}
+
+// screen -> graph (t,v)
+function fs(sx,sy){
+  var W=c.width,H=c.height,gw=W-PAD*2,gh=H-PAD*2;
+  var lx=(sx-panX)/zoom, ly=(sy-panY)/zoom;
+  var t=(lx-PAD)/gw;
+  var nv=1-(ly-PAD)/gh;
+  if(flip())nv=1-nv;
+  if (mode === 'bezier') {
+      return{t:t, v:bvRv(nv)};
+  } else {
+      var isFlat=Math.abs(vr.e-vr.s)<0.0001;
+      if(isFlat && mode==='bounce'){
+          // ts() flat-bounce uses nv=0.5+(1-v)*0.5; inverse: v=2-2*nv
+          return{t:t, v:2-2*nv};
+      }
+      return{t:t, v:nv};
+  }
+}
+
+// ============ BEZIER SAMPLER ============
+function bezier(){
+  var pts=[];
+  
+  // If we have explicit bezier keyframes (from physics conversion), use them
+  if (bezierKeyframes && bezierKeyframes.length >= 2) {
+      var kfs = bezierKeyframes;
+      var stepsPerSegment = Math.floor(200 / (kfs.length - 1));
+      
+      for (var seg = 0; seg < kfs.length - 1; seg++) {
+          var kf1 = kfs[seg];
+          var kf2 = kfs[seg + 1];
+          
+          // Get handle positions
+          var p0_t = kf1.t, p0_v = kf1.v;
+          var p3_t = kf2.t, p3_v = kf2.v;
+          var p1_t = kf1.rh ? kf1.rh.t : p0_t;
+          var p1_v = kf1.rh ? kf1.rh.v : p0_v;
+          var p2_t = kf2.lh ? kf2.lh.t : p3_t;
+          var p2_v = kf2.lh ? kf2.lh.v : p3_v;
+          
+          // Sample this segment
+          for (var i = 0; i <= stepsPerSegment; i++) {
+              var t = i / stepsPerSegment;
+              // Don't duplicate the endpoint (except for last segment)
+              if (i === stepsPerSegment && seg < kfs.length - 2) continue;
+              
+              var mt = 1 - t;
+              var curve_t = mt*mt*mt*p0_t + 3*mt*mt*t*p1_t + 3*mt*t*t*p2_t + t*t*t*p3_t;
+              var curve_v = mt*mt*mt*p0_v + 3*mt*mt*t*p1_v + 3*mt*t*t*p2_v + t*t*t*p3_v;
+              pts.push({t: curve_t, v: curve_v});
+          }
+      }
+      return pts;
+  }
+  
+  // Standard 2-point bezier with handles
+  // PARAMETRIC sampling for the preview (smooth even with extreme handles)
+  var rv=bvRv(rh.v),lv=bvRv(lh.v);
+  // Flat no-flip: use bezierVRange min/max as start/end so the curve reads
+  // as a normal ease (bottom→top) rather than a flat horizontal line.
+  var isFlatNoFlip=Math.abs(vr.e-vr.s)<0.0001&&!flipEnabled;
+  var bvrFNF=isFlatNoFlip?bezierVRange():null;
+  var sv=bvrFNF?bvrFNF.mn:vr.s, ev=bvrFNF?bvrFNF.mx:vr.e;
+  for(var i=0;i<=200;i++){
+    var u=i/200,m=1-u;
+    pts.push({t:m*m*m*0 + 3*m*m*u*rh.t + 3*m*u*u*lh.t + u*u*u*1,
+              v:m*m*m*sv + 3*m*m*u*rv + 3*m*u*u*lv + u*u*u*ev});
+  }
+  return pts;
+}
+
+// ============ ELASTIC PHYSICS ============
+function elasticOut(t, amplitude, bounciness, decay_x, decay_y, hang) {
+    if (t <= 0.0) return 0.0;
+    if (t >= 1.0) return 1.0;
+    
+    const TWO_PI = Math.PI * 2;
+    
+    // Decay Y warps the value axis (envelope decay rate)
+    const decay = 0.5 + decay_y * 7.5;
+    
+    // Decay X warps the time axis ONLY (frequency sweep)
+    let warped_t = t;
+    if (Math.abs(decay_x) > 0.001) {
+        const k = decay_x * 5.0; // The warp strength
+        warped_t = (Math.exp(k * t) - 1.0) / (Math.exp(k) - 1.0);
+    }
+    
+    const freq = Math.max(0.1, bounciness * 8.0); 
+    
+    if (hang <= 0.5) {
+        const f = hang * 2.0;
+        const env = Math.exp(-decay * t);
+        const phase = freq * warped_t * TWO_PI;
+        const elastic_val = 1.0 - env * ((1.0 - amplitude) + amplitude * Math.cos(phase));
+        const linear_val = t;
+        return linear_val + (elastic_val - linear_val) * f;
+    } else {
+        const f = (hang - 0.5) * 2.0;
+        const power = 1.0 + f * 4.0;
+        const scaled_t = Math.pow(t, power);
+        
+        // Re-warp scaled_t
+        let warped_scaled_t = scaled_t;
+        if (Math.abs(decay_x) > 0.001) {
+            const k = decay_x * 5.0;
+            warped_scaled_t = (Math.exp(k * scaled_t) - 1.0) / (Math.exp(k) - 1.0);
+        }
+        
+        const env2 = Math.exp(-decay * scaled_t);
+        const phase2 = freq * warped_scaled_t * TWO_PI;
+        return 1.0 - env2 * ((1.0 - amplitude) + amplitude * Math.cos(phase2));
+    }
+}
+
+function findPeaksAndValleys(points) {
+    let peaks = [], valleys = [];
+    for (let i = 2; i < points.length - 2; i++) {
+        const prev = points[i-1].v, curr = points[i].v, next = points[i+1].v;
+        if (curr > prev && curr > next && curr > 1.0) {
+            peaks.push({ t: points[i].t, v: curr, type: 'peak', idx: i });
+        } else if (curr < prev && curr < next && curr < 1.0) {
+            valleys.push({ t: points[i].t, v: curr, type: 'valley', idx: i });
+        }
+    }
+    return { peaks, valleys };
+}
+
+function calculateElasticKeyframes() {
+    let keyframes = [];
+    const steps = 400;
+    let points = [];
+    
+    for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const scaled_t = t / Math.max(ep.dur, 0.01);
+        let v;
+        if (scaled_t >= 1.0) {
+            v = 1.0;
+        } else {
+            // Use fixed hang=0.5 for physics math - ep.hg only controls bezier handles!
+            v = elasticOut(scaled_t, ep.amp, ep.b, ep.dx, ep.dy, 0.5);
+        }
+        points.push({ t: t, v: v });
+    }
+    
+    keyframes.push({ t: 0, v: 0, type: 'start' });
+    keyframes.push({ t: 1, v: 1, type: 'end' });
+    
+    const { peaks, valleys } = findPeaksAndValleys(points);
+    peaks.forEach(p => keyframes.push({ t: p.t, v: p.v, type: 'peak' }));
+    valleys.forEach(v => keyframes.push({ t: v.t, v: v.v, type: 'valley' }));
+    
+    keyframes.sort((a, b) => a.t - b.t);
+    return keyframes;
+}
+
+function getMaxSpan(node) {
+    let idx = pathData.indexOf(node);
+    let kf = node.point;
+    let prev = keyframesRef[idx - 1];
+    let next = keyframesRef[idx + 1];
+    
+    if (kf.type === 'peak' || kf.type === 'valley') {
+        let leftSpan = prev ? Math.sqrt(Math.pow(kf.t - prev.t, 2) + Math.pow(kf.v - prev.v, 2)) : 0;
+        let rightSpan = next ? Math.sqrt(Math.pow(next.t - kf.t, 2) + Math.pow(next.v - kf.v, 2)) : 0;
+        return { left: leftSpan, right: rightSpan };
+    }
+    return { left: 0, right: 0 };
+}
+
+function generateBezierPath(keyframes) {
+    let newPath = [];
+    keyframesRef = keyframes;
+    
+    for(let i = 0; i < keyframes.length; i++) {
+        let kf = keyframes[i];
+        let prev = keyframes[i-1];
+        let next = keyframes[i+1];
+        let lh, rh;
+        
+        if (!isManualEdit && (kf.type === 'peak' || kf.type === 'valley')) {
+            const hang = ep.hg; // Use hang parameter for peak smoothness control
+            let leftSpan = prev ? (kf.t - prev.t) : 0;
+            let rightSpan = next ? (next.t - kf.t) : 0;
+            let maxLeft = leftSpan * 0.95;
+            let maxRight = rightSpan * 0.95;
+            let leftOffset = MIN_OFFSET + (maxLeft - MIN_OFFSET) * hang;
+            let rightOffset = MIN_OFFSET + (maxRight - MIN_OFFSET) * hang;
+            
+            lh = { x: kf.t - leftOffset, y: kf.v };
+            rh = { x: kf.t + rightOffset, y: kf.v };
+        } else {
+            lh = { x: kf.t, y: kf.v };
+            rh = { x: kf.t, y: kf.v };
+            
+            if (prev) {
+                let dx = (kf.t - prev.t) / 3;
+                let dy = (kf.v - prev.v) / 3;
+                lh = { x: kf.t - dx, y: kf.v - dy };
+            }
+            if (next) {
+                let dx = (next.t - kf.t) / 3;
+                let dy = (kf.v - next.v) / 3;
+                rh = { x: kf.t + dx, y: kf.v - dy };
+            }
+        }
+        
+        newPath.push({ point: kf, lh: lh, rh: rh });
+    }
+    return newPath;
+}
+
+// ============ BOUNCE PHYSICS (matching core.py) ============
+const PI = Math.PI;
+
+function bounceBell(local_t, hang) {
+    // Bell curve for bounce: sin-based with hang control
+    var s = Math.sin(local_t * PI);
+    var u = 2.0 * (local_t <= 0.5 ? local_t : (1.0 - local_t));
+    if (hang <= 0.5) {
+        var f = hang * 2.0;
+        return u + (s - u) * f;
+    } else {
+        var f = (hang - 0.5) * 2.0;
+        var ss = s * s * (3.0 - 2.0 * s);
+        return s + (ss - s) * f;
+    }
+}
+
+function bounceOut(t, amplitude, bounciness, decay_x, decay_y, hang) {
+    if (t <= 0.0) return 0.0;
+    if (t >= 1.0) return 1.0;
+    
+    var b = Math.max(bounciness, 0.001);
+    var base_dur = Math.sqrt(amplitude) * 2.0;
+    var dips = [];
+    var osc_total = 0.0;
+    var h = amplitude;
+    var t_scale = 1.0;
+    
+    // Generate bounce "dips"
+    for (var i = 0; i < 30; i++) {
+        if (h < 0.0002) break;
+        var dur = base_dur * t_scale;
+        dips.push({t0: osc_total, dur: dur, h: h});
+        osc_total += dur;
+        h = h * Math.pow(b, 1.0 + decay_y);
+        t_scale = Math.max(t_scale * (1.0 - decay_x * 0.5), 0.05);
+    }
+    
+    // First half: drop from 1 to 0
+    if (t <= 0.5) {
+        var t_local = t * 2.0;
+        if (t_local <= 0.5) {
+            var phase = t_local / 0.5;
+            var local_t = 0.5 + phase * 0.5;
+            return 1.0 - bounceBell(local_t, hang);
+        } else {
+            if (dips.length === 0) return 1.0;
+            var phase = (t_local - 0.5) / 0.5;
+            return 1.0 - dips[0].h * bounceBell(phase, hang);
+        }
+    } else {
+        // Second half: bounces
+        var t_d = (t - 0.5) * 2.0;
+        var decay_total = 0;
+        for (var j = 1; j < dips.length; j++) decay_total += dips[j].dur;
+        if (decay_total <= 0.0 || dips.length < 2) return 1.0;
+        
+        var t_abs = t_d * decay_total;
+        var offset = 0.0;
+        for (var k = 1; k < dips.length; k++) {
+            var dip = dips[k];
+            if (t_abs <= offset + dip.dur) {
+                var local_t = (t_abs - offset) / Math.max(dip.dur, 0.0001);
+                return 1.0 - dip.h * bounceBell(local_t, hang);
+            }
+            offset += dip.dur;
+        }
+        return 1.0;
+    }
+}
+
+function calculateBounceKeyframes() {
+    let keyframes = [];
+    keyframes.push({ t: 0, v: 0.0, type: 'start' });
+    
+    let current_t = 0.0; 
+    const grav = Math.max(bp.grav, 0.1) * 20.0; 
+    const restitution = Math.max(1.0 - bp.b, 0.001); 
+    
+    // Initial drop from 0.0 to exactly 1.0. Distance is 1.0.
+    let t_initial_drop = Math.sqrt(2 * 1.0 / grav);
+    current_t += t_initial_drop;
+    
+    // Hit floor at v=1.0
+    keyframes.push({ t: current_t, v: 1.0, type: 'valley' });
+    
+    // Now simulate the bounces
+    let current_bounce_h = bp.amp; 
+    let bounces = 0;
+    
+    while (current_bounce_h > 0.005 && bounces < 12) {
+        bounces++;
+        
+        let t_rise = Math.sqrt(2 * current_bounce_h / grav);
+        let peak_t = current_t + t_rise;
+        
+        // Bounce up (since floor is 1.0, bounce goes UP to 1.0 - h)
+        keyframes.push({ t: peak_t, v: 1.0 - current_bounce_h, type: 'peak' });
+        
+        let valley_t = peak_t + t_rise;
+        
+        // Hit floor at v=1.0
+        keyframes.push({ t: valley_t, v: 1.0, type: 'valley' });
+        
+        current_t = valley_t;
+        current_bounce_h = current_bounce_h * restitution * (1.0 - bp.dy * 0.2);
+    }
+    
+    // Normalize time to [0, 1]
+    let total_time = current_t;
+    if (total_time > 0) {
+        keyframes.forEach(kf => {
+            let nt = kf.t / total_time;
+            if (Math.abs(bp.dx) > 0.001) {
+                const k = bp.dx * 3.0;
+                nt = (Math.exp(k * nt) - 1.0) / (Math.exp(k) - 1.0);
+            }
+            kf.t = nt;
+        });
+    }
+    
+    keyframes[keyframes.length-1].type = 'end';
+    
+    return keyframes;
+}
+
+function generateBouncePath(keyframes) {
+    let newPath = [];
+    keyframesRef = keyframes;
+    
+    for(let i = 0; i < keyframes.length; i++) {
+        let kf = keyframes[i];
+        let prev = keyframes[i-1];
+        let next = keyframes[i+1];
+        let lh, rh;
+        
+        if (!isManualEdit && kf.type === 'peak') {
+            // Peak = Air Arc (Smooth curve using hang parameter)
+            const hang = bp.hg;
+            
+            let leftSpan = prev ? (kf.t - prev.t) : 0;
+            let rightSpan = next ? (next.t - kf.t) : 0;
+            let maxLeft = leftSpan * 0.95;
+            let maxRight = rightSpan * 0.95;
+            let leftOffset = MIN_OFFSET + (maxLeft - MIN_OFFSET) * hang;
+            let rightOffset = MIN_OFFSET + (maxRight - MIN_OFFSET) * hang;
+            
+            lh = { x: kf.t - leftOffset, y: kf.v };
+            rh = { x: kf.t + rightOffset, y: kf.v };
+        }
+        else if (!isManualEdit && kf.type === 'valley') {
+            // Valley = Floor Hit (Sharp collision)
+            const hang = 0.0;
+            
+            let leftSpan = prev ? (kf.t - prev.t) : 0;
+            let rightSpan = next ? (next.t - kf.t) : 0;
+            let maxOffset = Math.min(leftSpan, rightSpan) * 0.95;
+            let offset = MIN_OFFSET + (maxOffset - MIN_OFFSET) * hang;
+            
+            lh = { x: kf.t - offset, y: kf.v };
+            rh = { x: kf.t + offset, y: kf.v };
+        }
+        else {
+            lh = { x: kf.t, y: kf.v };
+            rh = { x: kf.t, y: kf.v };
+            
+            if (prev) {
+                let dx = (kf.t - prev.t) / 3;
+                let dy = (kf.v - prev.v) / 3;
+                lh = { x: kf.t - dx, y: kf.v - dy };
+            }
+            if (next) {
+                let dx = (next.t - kf.t) / 3;
+                let dy = (kf.v - next.v) / 3;
+                rh = { x: kf.t + dx, y: kf.v - dy };
+            }
+        }
+        
+        newPath.push({ point: kf, lh: lh, rh: rh });
+    }
+    return newPath;
+}
+
+// ============ SAMPLER ============
+function elasticSampler() {
+    // Don't regenerate if dragging or if manual edits are present
+    if (!isDragging && !isManualEdit) {
+        let kfs = calculateElasticKeyframes();
+        if (!kfs || kfs.length < 2) {
+            return pathData || [];
+        }
+        pathData = generateBezierPath(kfs);
+    }
+    return pathData;
+}
+
+function bounceSampler() {
+    // Don't regenerate if dragging or if manual edits are present
+    if (!isDragging && !isManualEdit) {
+        let kfs = calculateBounceKeyframes();
+        if (!kfs || kfs.length < 2) {
+            return pathData || [];
+        }
+        pathData = generateBouncePath(kfs);
+    }
+    return pathData;
+}
+
+function sample(){
+    if (mode === 'elastic') return elasticSampler();
+    if (mode === 'bounce') return bounceSampler();
+    return bezier();
+}
+
+function queueDraw(){if(!raf)raf=requestAnimationFrame(function(){raf=null;draw();});}
+
+// ============ DRAWING ============
+function draw(){
+  var W=c.width,H=c.height;
+  g.clearRect(0,0,W,H);
+  g.fillStyle=BG;g.fillRect(0,0,W,H);
+
+  // Infinite grid
+  var corners=[fs(0,0),fs(W,0),fs(0,H),fs(W,H)];
+  var tArr=corners.map(function(p){return p.t;}),vArr=corners.map(function(p){return p.v;});
+  var tMin=Math.min.apply(null,tArr),tMax=Math.max.apply(null,tArr);
+  var vMin=Math.min.apply(null,vArr),vMax=Math.max.apply(null,vArr);
+  var step=0.1;
+  g.strokeStyle='#262624';g.lineWidth=0.5;
+  var t0=Math.floor(tMin/step)*step;
+  for(var t=t0;t<=tMax+step;t+=step){
+    var p0=ts(t,vMin-1),p1=ts(t,vMax+1);
+    g.beginPath();g.moveTo(p0.x,p0.y);g.lineTo(p1.x,p1.y);g.stroke();
+  }
+  var mn=Math.min(vr.s,vr.e),mx=Math.max(vr.s,vr.e);
+  var vStep=step*(mx-mn||1);
+  var v0=Math.floor(vMin/vStep)*vStep;
+  for(var v=v0;v<=vMax+vStep;v+=vStep){
+    var q0=ts(tMin-1,v),q1=ts(tMax+1,v);
+    g.beginPath();g.moveTo(q0.x,q0.y);g.lineTo(q1.x,q1.y);g.stroke();
+  }
+
+  // Center crosshair lines — scale with canvas size
+  var crossW = Math.max(0.5, W / 380);
+  var vMid = vr.s + (vr.e - vr.s) * 0.5;
+  var ch_v0=ts(0.5,vMin-2),ch_v1=ts(0.5,vMax+2);
+  var ch_h0=ts(tMin-2,vMid),ch_h1=ts(tMax+2,vMid);
+  g.strokeStyle='#323230';g.lineWidth=crossW;
+  g.beginPath();g.moveTo(ch_v0.x,ch_v0.y);g.lineTo(ch_v1.x,ch_v1.y);g.stroke();
+  g.beginPath();g.moveTo(ch_h0.x,ch_h0.y);g.lineTo(ch_h1.x,ch_h1.y);g.stroke();
+
+  // Diagonal ref — anchors computed per mode for flat cases.
+  var _fnf=mode==='bezier'&&Math.abs(vr.e-vr.s)<0.0001&&!flipEnabled;
+  var _bvrf=_fnf?bezierVRange():null;
+  var _flatBounce=mode==='bounce'&&Math.abs(vr.e-vr.s)<0.0001;
+  // For flat bounce: anchor at physics v=1.0 (valley/floor) = center baseline
+  var a0=_bvrf?ts(0,_bvrf.mn):(_flatBounce?ts(0,1.0):ts(0,vr.s));
+  var a1=_bvrf?ts(1,_bvrf.mx):(_flatBounce?ts(1,1.0):ts(1,vr.e));
+  g.strokeStyle='#2c2c28';g.lineWidth=.8;g.setLineDash([5,4]);
+  g.beginPath();g.moveTo(a0.x,a0.y);g.lineTo(a1.x,a1.y);g.stroke();
+  g.setLineDash([]);
+
+  // Curve
+  if (mode === 'bezier') {
+    drawBezierCurve(a0, a1);
+  } else {
+    drawPhysicsCurve();
+  }
+}
+
+function drawBezierCurve(a0, a1) {
+    var pp=bezier();
+    g.beginPath();
+    for(var i=0;i<pp.length;i++){var px=ts(pp[i].t,pp[i].v);i===0?g.moveTo(px.x,px.y):g.lineTo(px.x,px.y);}
+    g.strokeStyle=AC;g.lineWidth=2.5;g.lineJoin='round';g.lineCap='round';g.stroke();
+
+    // Handles - always visible for bezier
+    var rv=bvRv(rh.v),lv=bvRv(lh.v);
+    var rp=ts(rh.t,rv),lp=ts(lh.t,lv);
+    g.strokeStyle='#484844';g.lineWidth=1;g.setLineDash([3,3]);
+    g.beginPath();g.moveTo(a0.x,a0.y);g.lineTo(rp.x,rp.y);g.stroke();
+    g.beginPath();g.moveTo(a1.x,a1.y);g.lineTo(lp.x,lp.y);g.stroke();
+    g.setLineDash([]);
+    var dots=[['rh',rp],['lh',lp]];
+    for(var d=0;d<dots.length;d++){
+      var k=dots[d][0],dp=dots[d][1],hot=drag===k;
+      g.beginPath();g.arc(dp.x,dp.y,hot?8:7,0,Math.PI*2);
+      g.fillStyle=AC;g.fill();g.strokeStyle=BG;g.lineWidth=2;g.stroke();
+      if(hot){
+        g.beginPath();g.arc(dp.x,dp.y,14,0,Math.PI*2);
+        g.strokeStyle=AC;g.globalAlpha=0.25;g.lineWidth=3;g.stroke();
+        g.globalAlpha=1;
+      }
+    }
+    g.strokeStyle=AC;g.globalAlpha=0.15;g.lineWidth=1;
+    g.beginPath();g.arc(a0.x,a0.y,4,0,Math.PI*2);g.stroke();
+    g.beginPath();g.arc(a1.x,a1.y,4,0,Math.PI*2);g.stroke();
+    g.globalAlpha=1;
+}
+
+function drawPhysicsCurve() {
+    var path = sample();
+    if (!path || path.length < 2) {
+        return;
+    }
+    
+    // Validate path data
+    for (let i = 0; i < path.length; i++) {
+        let node = path[i];
+        if (!node.point || typeof node.point.t !== 'number' || typeof node.point.v !== 'number') {
+            return;
+        }
+    }
+    
+    // For 'in' direction, transform the path to show oscillation at start
+    // Mathematical transformation: f_in(t) = 1 - f_out(1 - t)
+    var drawPath = path;
+    if (curveDir === 'in') {
+        // Create transformed path
+        drawPath = path.map((node, idx) => {
+            // Mirror time and value: t' = 1-t, v' = 1-v
+            // But since ease-out goes 0->1, ease-in should also go 0->1
+            // The transformation is: sample at 1-t, show value as 1-sample_value
+            var mirroredIdx = path.length - 1 - idx;
+            var sourceNode = path[mirroredIdx];
+            // Guard against invalid source node
+            if (!sourceNode || !sourceNode.point) {
+                return node;
+            }
+            return {
+                point: {
+                    t: 1.0 - sourceNode.point.t,
+                    v: 1.0 - sourceNode.point.v,
+                    type: sourceNode.point.type
+                },
+                lh: {
+                    x: 1.0 - (sourceNode.rh ? sourceNode.rh.x : sourceNode.point.t),
+                    y: 1.0 - (sourceNode.rh ? sourceNode.rh.y : sourceNode.point.v)
+                },
+                rh: {
+                    x: 1.0 - (sourceNode.lh ? sourceNode.lh.x : sourceNode.point.t),
+                    y: 1.0 - (sourceNode.lh ? sourceNode.lh.y : sourceNode.point.v)
+                }
+            };
+        });
+    }
+    
+    // Draw curve
+    g.strokeStyle = AC;
+    g.lineWidth = 2.5;
+    g.lineJoin = 'round';
+    g.lineCap = 'round';
+    g.beginPath();
+    
+    drawPath.forEach((node, i) => {
+        let px = ts(node.point.t, node.point.v);
+        if (i === 0) {
+            g.moveTo(px.x, px.y);
+        } else {
+            let prev = drawPath[i-1];
+            let p1 = ts(prev.rh.x, prev.rh.y);
+            let p2 = ts(node.lh.x, node.lh.y);
+            g.bezierCurveTo(p1.x, p1.y, p2.x, p2.y, px.x, px.y);
+        }
+    });
+    g.stroke();
+    
+    // Draw handles and points (use drawPath which has the transformed data for 'in' direction)
+    drawPath.forEach((node, i) => {
+        let px = ts(node.point.t, node.point.v);
+        let p_lh = ts(node.lh.x, node.lh.y);
+        let p_rh = ts(node.rh.x, node.rh.y);
+        
+        let handleColor = '#FF5500';
+        if (node.point.type === 'peak') handleColor = AC;
+        else if (node.point.type === 'valley') handleColor = '#04D9FF';
+        
+        // Determine if handles should be visible for this point
+        // Show handles when: 
+        // - point is selected
+        // - currently dragging this point
+        // - shift/ctrl is pressed AND this point type matches the dragged type (peak/valley)
+        let isGlobalEdit = (shift || ctrl) && globalEditType;
+        let showHandles = (selectedPoint === i) || 
+                          (isDragging && activeHandle && activeHandle.nodeIndex === i) ||
+                          (isGlobalEdit && node.point.type === globalEditType);
+        
+        if (showHandles) {
+            // Handle lines
+            g.strokeStyle = handleColor;
+            g.lineWidth = 1;
+            g.beginPath();
+            g.moveTo(px.x, px.y);
+            g.lineTo(p_lh.x, p_lh.y);
+            g.stroke();
+            g.beginPath();
+            g.moveTo(px.x, px.y);
+            g.lineTo(p_rh.x, p_rh.y);
+            g.stroke();
+            
+            // Handle squares
+            g.fillStyle = handleColor;
+            g.fillRect(p_lh.x - 4, p_lh.y - 4, 8, 8);
+            g.fillRect(p_rh.x - 4, p_rh.y - 4, 8, 8);
+        }
+        
+        // Keyframe point - always visible
+        g.fillStyle = '#FFF';
+        g.beginPath();
+        g.arc(px.x, px.y, 4, 0, Math.PI*2);
+        g.fill();
+        
+        // Highlight selected point
+        if (selectedPoint === i) {
+            g.strokeStyle = AC;
+            g.lineWidth = 2;
+            g.beginPath();
+            g.arc(px.x, px.y, 6, 0, Math.PI*2);
+            g.stroke();
+        }
+    });
+}
+
+// ============ MOUSE HANDLING ============
+c.addEventListener('mousedown',function(e){
+  var m=mouseXY(e);
+  if(space||e.button===1){isPan=true;px0=m.x;py0=m.y;ox0=panX;oy0=panY;c.style.cursor='grabbing';e.preventDefault();return;}
+  if(e.button===0){
+    if(mode==='bezier'){
+        handleBezierMouseDown(m);
+    } else {
+        handlePhysicsMouseDown(m);
+    }
+  }
+});
+
+function handleBezierMouseDown(m){
+  var rv=bvRv(rh.v),lv=bvRv(lh.v);
+  var rp=ts(rh.t,rv),lp=ts(lh.t,lv);
+  if(Math.hypot(m.x-rp.x,m.y-rp.y)<=16){
+    drag='rh';
+    selectedPoint='rh';
+    draw();
+    if(bridge&&bridge.handleDragStarted)bridge.handleDragStarted('rh',rh.t,rh.v);
+    return;
+  }
+  if(Math.hypot(m.x-lp.x,m.y-lp.y)<=16){
+    drag='lh';
+    selectedPoint='lh';
+    draw();
+    if(bridge&&bridge.handleDragStarted)bridge.handleDragStarted('lh',lh.t,lh.v);
+    return;
+  }
+}
+
+function getTransformedNode(node, idx, total) {
+    // For 'in' direction, return the transformed node position
+    if (curveDir === 'in') {
+        var mirroredIdx = total - 1 - idx;
+        var sourceNode = pathData[mirroredIdx];
+        return {
+            point: {
+                t: 1.0 - sourceNode.point.t,
+                v: 1.0 - sourceNode.point.v,
+                type: sourceNode.point.type
+            },
+            lh: {
+                x: 1.0 - sourceNode.rh.x,
+                y: 1.0 - sourceNode.rh.y
+            },
+            rh: {
+                x: 1.0 - sourceNode.lh.x,
+                y: 1.0 - sourceNode.lh.y
+            }
+        };
+    }
+    return node;
+}
+
+function handlePhysicsMouseDown(m){
+    let isInMode = curveDir === 'in';
+    
+    // First check if clicked on a handle of the selected point
+    if (selectedPoint !== null && pathData[selectedPoint]) {
+        let node = getTransformedNode(pathData[selectedPoint], selectedPoint, pathData.length);
+        let p_lh = ts(node.lh.x, node.lh.y);
+        let p_rh = ts(node.rh.x, node.rh.y);
+        
+        if (Math.hypot(m.x - p_lh.x, m.y - p_lh.y) < 12) {
+            isDragging = true;
+            // In IN mode, visual 'lh' is actually 'rh' of the mirrored node
+            let actualType = isInMode ? 'rh' : 'lh';
+            let actualNodeIdx = isInMode ? (pathData.length - 1 - selectedPoint) : selectedPoint;
+            activeHandle = { nodeIndex: actualNodeIdx, visualNodeIndex: selectedPoint, type: actualType, visualType: 'lh', nodeType: pathData[actualNodeIdx].point.type };
+            isManualEdit = true;
+            dragStartState = pathData.map(n => ({
+                lh: { ...n.lh },
+                rh: { ...n.rh },
+                point: n.point
+            }));
+            c.style.cursor = 'grabbing';
+            return;
+        }
+        if (Math.hypot(m.x - p_rh.x, m.y - p_rh.y) < 12) {
+            isDragging = true;
+            // In IN mode, visual 'rh' is actually 'lh' of the mirrored node
+            let actualType = isInMode ? 'lh' : 'rh';
+            let actualNodeIdx = isInMode ? (pathData.length - 1 - selectedPoint) : selectedPoint;
+            activeHandle = { nodeIndex: actualNodeIdx, visualNodeIndex: selectedPoint, type: actualType, visualType: 'rh', nodeType: pathData[actualNodeIdx].point.type };
+            isManualEdit = true;
+            dragStartState = pathData.map(n => ({
+                lh: { ...n.lh },
+                rh: { ...n.rh },
+                point: n.point
+            }));
+            c.style.cursor = 'grabbing';
+            return;
+        }
+    }
+    
+    // Check if clicked on any keyframe point (to select it)
+    for (let i = 0; i < pathData.length; i++) {
+        let node = getTransformedNode(pathData[i], i, pathData.length);
+        let px = ts(node.point.t, node.point.v);
+        if (Math.hypot(m.x - px.x, m.y - px.y) < 12) {
+            selectedPoint = i;
+            draw();
+            return;
+        }
+    }
+}
+
+window.addEventListener('mousemove',function(e){
+  var m=mouseXY(e);
+  if(isPan){panX=ox0+(m.x-px0);panY=oy0+(m.y-py0);queueDraw();return;}
+  
+  if(mode==='bezier' && drag){
+    handleBezierMouseMove(m);
+  } else if ((mode==='elastic' || mode==='bounce') && isDragging && activeHandle) {
+    handlePhysicsMouseMove(m);
+  } else if (mode==='elastic' || mode==='bounce') {
+    // Hover detection for cursor
+    handlePhysicsHover(m);
+  }
+});
+
+function handlePhysicsHover(m){
+    let isInMode = curveDir === 'in';
+    
+    // Check if hovering over selected point's handles
+    if (selectedPoint !== null && pathData[selectedPoint]) {
+        let node = getTransformedNode(pathData[selectedPoint], selectedPoint, pathData.length);
+        let p_lh = ts(node.lh.x, node.lh.y);
+        let p_rh = ts(node.rh.x, node.rh.y);
+        if (Math.hypot(m.x - p_lh.x, m.y - p_lh.y) < 12 || Math.hypot(m.x - p_rh.x, m.y - p_rh.y) < 12) {
+            c.style.cursor = 'grab';
+            return;
+        }
+    }
+    
+    // Check if hovering over any keyframe point
+    for (let i = 0; i < pathData.length; i++) {
+        let node = getTransformedNode(pathData[i], i, pathData.length);
+        let px = ts(node.point.t, node.point.v);
+        if (Math.hypot(m.x - px.x, m.y - px.y) < 12) {
+            c.style.cursor = 'pointer';
+            return;
+        }
+    }
+    
+    c.style.cursor = 'crosshair';
+}
+
+// Soft snap: 4 corners + 4 edge midpoints in normalized (t, v) handle space
+var SNAP_POINTS=[
+  {t:0,v:0},{t:1,v:0},{t:0,v:1},{t:1,v:1},
+  {t:0.5,v:0},{t:0.5,v:1},{t:0,v:0.5},{t:1,v:0.5}
+];
+function snapHandle(t,v){
+  var W=c.width,H=c.height;
+  var snapPx=Math.max(10,Math.min(18,W*0.04));
+  var hx=ts(t,bvRv(v));
+
+  // Point snapping (corners + midpoints) — highest priority
+  var best=null,bestD=Infinity;
+  for(var i=0;i<SNAP_POINTS.length;i++){
+    var sp=SNAP_POINTS[i];
+    var px=ts(sp.t,bvRv(sp.v));
+    var d=Math.hypot(px.x-hx.x,px.y-hx.y);
+    if(d<snapPx&&d<bestD){bestD=d;best=sp;}
+  }
+  if(best)return{t:best.t,v:best.v};
+
+  // Soft edge snapping — snap perpendicular axis when near any edge
+  // x-axis depends only on t; y-axis depends only on v
+  var edgeL=ts(0,bvRv(0)).x, edgeR=ts(1,bvRv(0)).x;
+  var edgeB=ts(0,bvRv(0)).y, edgeT=ts(0,bvRv(1)).y;
+  var st=t, sv=v;
+  if(Math.abs(hx.x-edgeL)<snapPx) st=0;
+  else if(Math.abs(hx.x-edgeR)<snapPx) st=1;
+  if(Math.abs(hx.y-edgeB)<snapPx) sv=0;
+  else if(Math.abs(hx.y-edgeT)<snapPx) sv=1;
+  return{t:st,v:sv};
+}
+
+function handleBezierMouseMove(m){
+  var p=fs(m.x,m.y);
+  // Compute nv directly from mouse Y to avoid bvRv/bvRvInv double-inversion
+  // for descending bezier (vr.s > vr.e). ts() uses |range| normalization
+  // so handle value = raw screen nv (0=bottom,1=top), not bvRvInv(p.v).
+  var gh=c.height-PAD*2;
+  var ly=(m.y-panY)/zoom;
+  var nv=1-(ly-PAD)/gh;  // no hard clamp — snap is soft, handles can go beyond 0-1
+  // When flipEnabled + descending (vr.s>vr.e), flip()=false so ts() uses absolute
+  // range without visual inversion. bvRv() maps v→actual in reverse, making screen
+  // nv and stored v inversely related. Invert so dragging up moves handle up.
+  if (flipEnabled && vr.s > vr.e) nv = 1-nv;
+  var snapped=snapHandle(p.t,nv);
+  var st=snapped.t,sv=snapped.v;
+  if(drag==='rh'){rh={t:st,v:sv};}else{lh={t:st,v:sv};}
+  if(shift){
+    if(drag==='rh'){lh={t:st,v:sv};}else{rh={t:st,v:sv};}
+  } else if(ctrl){
+    if(drag==='rh'){lh={t:1-st,v:1-sv};}else{rh={t:1-st,v:1-sv};}
+  }
+  if(bridge&&bridge.handleMovedMod){
+    var h=drag==='rh'?rh:lh;
+    bridge.handleMovedMod(drag,h.t,h.v,shift,ctrl);
+  }else if(bridge&&bridge.handleMoved){
+    var h=drag==='rh'?rh:lh;
+    bridge.handleMoved(drag,h.t,h.v);
+  }
+  queueDraw();
+}
+
+function handlePhysicsMouseMove(m){
+    let p = fs(m.x, m.y);
+    let t = Math.max(0, Math.min(1, p.t));
+    let v = Math.max(-0.5, Math.min(2.0, p.v));
+    
+    // activeHandle now contains the actual (internal) node index and handle type
+    let actualNodeIndex = activeHandle.nodeIndex;
+    let actualHandleType = activeHandle.type;
+    let nodeType = activeHandle.nodeType;
+    
+    // Mirror coordinates back for IN mode
+    let isInMode = curveDir === 'in';
+    let actualT = isInMode ? (1.0 - t) : t;
+    let actualV = isInMode ? (1.0 - v) : v;
+    
+    let node = pathData[actualNodeIndex];
+    let kf = node.point;
+    
+    // Set global edit type when shift/ctrl is pressed
+    if (shift || ctrl) {
+        globalEditType = nodeType;
+    }
+    
+    // Calculate drag vector and hang ratio (using actual coordinates)
+    let draggedDx = actualT - kf.t;
+    let draggedDy = actualV - kf.v;
+    let draggedDist = Math.sqrt(draggedDx * draggedDx + draggedDy * draggedDy);
+    let draggedAngle = Math.atan2(draggedDy, draggedDx);
+    
+    let spans = getMaxSpan(node);
+    let maxSpan = (actualHandleType === 'lh') ? spans.left : spans.right;
+    let hangRatio = Math.min(1, Math.max(0, (draggedDist - MIN_OFFSET) / (maxSpan - MIN_OFFSET)));
+    
+    if (ctrl) {
+        // CTRL: Global Mirror
+        pathData.forEach((n, idx) => {
+            if (n.point.type === nodeType) {
+                let nSpans = getMaxSpan(n);
+                if (actualHandleType === 'rh') {
+                    let rightLen = MIN_OFFSET + (nSpans.right - MIN_OFFSET) * hangRatio;
+                    let leftLen = MIN_OFFSET + (nSpans.left - MIN_OFFSET) * hangRatio;
+                    n.rh = {
+                        x: n.point.t + Math.cos(draggedAngle) * rightLen,
+                        y: n.point.v + Math.sin(draggedAngle) * rightLen
+                    };
+                    n.lh = {
+                        x: n.point.t - Math.cos(draggedAngle) * leftLen,
+                        y: n.point.v - Math.sin(draggedAngle) * leftLen
+                    };
+                } else {
+                    let leftLen = MIN_OFFSET + (nSpans.left - MIN_OFFSET) * hangRatio;
+                    let rightLen = MIN_OFFSET + (nSpans.right - MIN_OFFSET) * hangRatio;
+                    n.lh = {
+                        x: n.point.t + Math.cos(draggedAngle) * leftLen,
+                        y: n.point.v + Math.sin(draggedAngle) * leftLen
+                    };
+                    n.rh = {
+                        x: n.point.t - Math.cos(draggedAngle) * rightLen,
+                        y: n.point.v - Math.sin(draggedAngle) * rightLen
+                    };
+                }
+            }
+        });
+    } else if (shift) {
+        // SHIFT: Global same direction
+        pathData.forEach((n, idx) => {
+            if (n.point.type === nodeType) {
+                let nSpans = getMaxSpan(n);
+                if (actualHandleType === 'lh') {
+                    let leftLen = MIN_OFFSET + (nSpans.left - MIN_OFFSET) * hangRatio;
+                    n.lh = {
+                        x: n.point.t + Math.cos(draggedAngle) * leftLen,
+                        y: n.point.v + Math.sin(draggedAngle) * leftLen
+                    };
+                } else {
+                    let rightLen = MIN_OFFSET + (nSpans.right - MIN_OFFSET) * hangRatio;
+                    n.rh = {
+                        x: n.point.t + Math.cos(draggedAngle) * rightLen,
+                        y: n.point.v + Math.sin(draggedAngle) * rightLen
+                    };
+                }
+            }
+        });
+    } else {
+        // NORMAL: Just update the dragged handle
+        if (actualHandleType === 'lh') node.lh = { x: actualT, y: actualV };
+        else node.rh = { x: actualT, y: actualV };
+    }
+    
+    queueDraw();
+}
+
+var clickStartPos = null;
+var CLICK_THRESHOLD = 5; // pixels
+
+c.addEventListener('mousedown',function(e){
+  if(e.button===0 && !space){
+    clickStartPos = mouseXY(e);
+  }
+});
+
+window.addEventListener('mouseup',function(e){
+  if(isPan){isPan=false;c.style.cursor=space?'grab':'crosshair';return;}
+  
+  // Check for click (not drag)
+  if(clickStartPos && !drag && !isDragging){
+    var endPos = mouseXY(e);
+    var dist = Math.hypot(endPos.x - clickStartPos.x, endPos.y - clickStartPos.y);
+    if(dist < CLICK_THRESHOLD){
+      handleClick(clickStartPos);
+    }
+  }
+  clickStartPos = null;
+  
+  if(drag){if(bridge&&bridge.handleReleased)bridge.handleReleased();drag=null;draw();}
+  if(isDragging){isDragging=false;activeHandle=null;globalEditType=null;c.style.cursor='crosshair';}
+});
+
+function handleClick(m){
+  if(mode==='bezier'){
+    // Check if clicked near a handle to select it
+    var rv=bvRv(rh.v),lv=bvRv(lh.v);
+    var rp=ts(rh.t,rv),lp=ts(lh.t,lv);
+    if(Math.hypot(m.x-rp.x,m.y-rp.y)<=16){
+      selectedPoint = 'rh';
+      draw();
+      return;
+    }
+    if(Math.hypot(m.x-lp.x,m.y-lp.y)<=16){
+      selectedPoint = 'lh';
+      draw();
+      return;
+    }
+    // Clicked elsewhere - deselect
+    selectedPoint = null;
+    draw();
+  } else if(mode==='elastic' || mode==='bounce'){
+    // Check if clicked near a keyframe point
+    for(let i=0; i<pathData.length; i++){
+      let node = pathData[i];
+      let px = ts(node.point.t, node.point.v);
+      if(Math.hypot(m.x-px.x, m.y-px.y) < 12){
+        selectedPoint = i;
+        draw();
+        return;
+      }
+    }
+    // Clicked elsewhere - deselect
+    selectedPoint = null;
+    draw();
+  }
+}
+c.addEventListener('contextmenu',function(e){e.preventDefault();});
+
+// ============ ZOOM ============
+c.addEventListener('wheel',function(e){
+  e.preventDefault();
+  var m=mouseXY(e);
+  var f=e.deltaY<0?1.12:1/1.12;
+  panX=m.x-(m.x-panX)*f;
+  panY=m.y-(m.y-panY)*f;
+  zoom=Math.max(.2,Math.min(zoom*f,10));
+  queueDraw();
+},{passive:false});
+c.addEventListener('dblclick',function(){zoom=1;panX=0;panY=0;draw();});
+
+// ============ API ============
+function setMode(m, forceReset){
+    if (mode === m && !forceReset) return;
+    mode=m;
+    isManualEdit=false;
+    selectedPoint=null;
+    pathData=null;
+    // Clear bezier keyframes when switching modes
+    if(m !== 'bezier'){
+        bezierKeyframes = null;
+    }
+    draw();
+}
+function setValueRange(s,e){vr={s:s,e:e};draw();}
+function setHandles(r,l){
+    if(r)rh={t:r.t!=null?r.t:.33,v:r.v!=null?r.v:0};
+    if(l)lh={t:l.t!=null?l.t:.67,v:l.v!=null?l.v:1};
+    // Clear bezier keyframes when using simple handles
+    bezierKeyframes = null;
+    draw();
+}
+function setElasticParams(b,amp,dur,dx,dy,hang){
+    ep={b:b,amp:amp,dur:dur,dx:dx,dy:dy,hg:hang};
+    isManualEdit=false; selectedPoint=null; activeHandle=null; isDragging=false; drag=null; pathData=null;
+    draw();
+}
+function setBounceParams(b,amp,grav,dx,dy,hang){
+    bp={b:b,amp:amp,grav:grav,dx:dx,dy:dy,hg:hang};
+    isManualEdit=false; selectedPoint=null; activeHandle=null; isDragging=false; drag=null; pathData=null;
+    draw();
+}
+function setAccentColor(col){AC=col;draw();}
+function setBgColor(col){BG=col;document.body.style.background=col;draw();}
+function setDirection(dir){curveDir=dir;pathData=null;draw();}
+function resetManualEdits(){isManualEdit=false;selectedPoint=null;pathData=null;draw();}
+
+// Set multiple bezier keyframes (for physics curves converted to bezier)
+// keyframes: array of {t, v, lh?: {t, v}, rh?: {t, v}}
+var bezierKeyframes = null;
+function setBezierKeyframes(keyframes){
+    bezierKeyframes = keyframes;
+    pathData = null;
+    draw();
+}
+
+// ============ CURVE SAMPLER ============
+function getCurvePoints(){
+    if (mode === 'bezier') {
+        var pts = bezier();
+        return pts.map(function(p){return{t:p.t,v:p.v};});
+    } else {
+        // For elastic/bounce, return the bezier path data
+        var pts = sample();
+        // Sample points along the bezier curves
+        var result = [];
+        for (var i = 0; i < pts.length; i++) {
+            result.push({t: pts[i].point.t, v: pts[i].point.v});
+        }
+        return result;
+    }
+}
+
+// ============ UNIFIED CURVE EXPORT (for Resolve) ============
+// Returns the full bezier structure with handles, normalized to [0,1] range
+// Resolve will scale this to actual frame/value ranges
+function getCurveKeyframes(){
+    var keyframes = [];
+    
+    // If we have explicit bezier keyframes (from physics conversion), return them
+    if (bezierKeyframes && bezierKeyframes.length >= 2) {
+        return JSON.parse(JSON.stringify(bezierKeyframes));
+    }
+    
+    // Debug log
+    // console.log('[getCurveKeyframes] mode=' + mode + ', pathData.length=' + (pathData ? pathData.length : 'null'));
+    
+    if (mode === 'bezier') {
+        // Simple 2-point bezier with handles
+        var isInMode = curveDir === 'in';
+        if (isInMode) {
+            // In mode flips the coordinates and swaps rh/lh logic to match the canvas
+            // Use un-inverted v values because Python automatically flips y-space via 'value_range'
+            keyframes = [
+                {t: 0, v: 0, rh: {t: 1.0 - lh.t, v: lh.v}},
+                {t: 1, v: 1, lh: {t: 1.0 - rh.t, v: rh.v}}
+            ];
+        } else {
+            keyframes = [
+                {t: 0, v: 0, rh: {t: rh.t, v: rh.v}},
+                {t: 1, v: 1, lh: {t: lh.t, v: lh.v}}
+            ];
+        }
+    } else if (mode === 'elastic' || mode === 'bounce') {
+        // Elastic/Bounce - export the bezier path data
+        // Force regenerate pathData if needed (in case handles were edited)
+        if (mode === 'elastic') {
+            elasticSampler();
+        } else {
+            bounceSampler();
+        }
+        
+        var path = pathData || [];
+        
+        // Debug: log pathData info
+        console.log('[getCurveKeyframes] pathData length: ' + path.length + ', isManualEdit: ' + isManualEdit);
+        if (path.length > 0) {
+            console.log('[getCurveKeyframes] First node: point=' + JSON.stringify(path[0].point) + ', rh=' + JSON.stringify(path[0].rh));
+        }
+        var isInMode = curveDir === 'in';
+        
+        for (var i = 0; i < path.length; i++) {
+            var node;
+            
+            if (isInMode) {
+                var mirroredIdx = path.length - 1 - i;
+                var sourceNode = path[mirroredIdx];
+                if (!sourceNode) continue;
+                
+                node = {
+                    point: {
+                        t: 1.0 - sourceNode.point.t,
+                        v: 1.0 - sourceNode.point.v
+                    },
+                    lh: {
+                        x: 1.0 - (sourceNode.rh ? sourceNode.rh.x : sourceNode.point.t),
+                        y: 1.0 - (sourceNode.rh ? sourceNode.rh.y : sourceNode.point.v)
+                    },
+                    rh: {
+                        x: 1.0 - (sourceNode.lh ? sourceNode.lh.x : sourceNode.point.t),
+                        y: 1.0 - (sourceNode.lh ? sourceNode.lh.y : sourceNode.point.v)
+                    }
+                };
+            } else {
+                node = path[i];
+            }
+            
+            if (!node || !node.point) continue;
+            
+            var kf = {
+                t: node.point.t,
+                v: node.point.v
+            };
+            
+            if (i < path.length - 1 && node.rh) {
+                kf.rh = {t: node.rh.x, v: node.rh.y};
+            }
+            if (i > 0 && node.lh) {
+                kf.lh = {t: node.lh.x, v: node.lh.y};
+            }
+            
+            keyframes.push(kf);
+        }
+        
+        // Debug log
+        console.log('[getCurveKeyframes] Exported ' + keyframes.length + ' keyframes, mode=' + mode + ', dir=' + curveDir);
+        for (let i = 0; i < keyframes.length; i++) {
+            let kf = keyframes[i];
+            let rhStr = kf.rh ? ` RH=(${kf.rh.t.toFixed(4)}, ${kf.rh.v.toFixed(4)})` : '';
+            let lhStr = kf.lh ? ` LH=(${kf.lh.t.toFixed(4)}, ${kf.lh.v.toFixed(4)})` : '';
+            console.log(`  KF[${i}]: t=${kf.t.toFixed(4)}, v=${kf.v.toFixed(4)}${rhStr}${lhStr}`);
+        }
+    }
+    
+    // Return a copy that can be properly serialized by Qt WebEngine
+    return JSON.parse(JSON.stringify(keyframes));
+}
+
+draw();
+</script>
+</body>
+</html>

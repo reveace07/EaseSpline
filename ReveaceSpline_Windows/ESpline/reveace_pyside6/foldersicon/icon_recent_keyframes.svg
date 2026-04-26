@@ -1,0 +1,10 @@
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Track line -->
+  <line x1="1" y1="12" x2="22" y2="12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity="0.3"/>
+  <!-- 2 older diamonds (dim) -->
+  <polygon points="4,9 7,12 4,15 1,12" fill="currentColor" opacity="0.3"/>
+  <polygon points="11,9 14,12 11,15 8,12" fill="currentColor" opacity="0.3"/>
+  <!-- Most recent diamond (active) + selection ring — shifted left so circle fits -->
+  <polygon points="17,9 20,12 17,15 14,12" fill="currentColor"/>
+  <circle cx="17" cy="12" r="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+</svg>

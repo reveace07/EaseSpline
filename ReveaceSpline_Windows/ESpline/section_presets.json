@@ -1,0 +1,51 @@
+{
+  "Easing": [
+    "Back In",
+    "Back Out",
+    "Ease In (Expo)",
+    "Circular Out",
+    "Circular In",
+    "Circular In-Out",
+    "Ease Out (Expo)",
+    "Ease In-Out (Cubic)",
+    "Ease In (Cubic)",
+    "Ease Out (Cubic)",
+    "Linear",
+    "Ease Out",
+    "Ease In",
+    "Ease In-Out",
+    "xyro1"
+  ],
+  "Dynamic": [
+    "Overshoot",
+    "Strong Overshoot",
+    "Anticipate",
+    "Whip",
+    "Double Back",
+    "Smooth Damp",
+    "Circular Out",
+    "Back In",
+    "Step In",
+    "Step Out",
+    "Step Mid",
+    "S-Curve",
+    "Reverse Ease",
+    "Slow Mo",
+    "Logarithmic"
+  ],
+  "Special": [
+    "Step In",
+    "Step Out",
+    "Step Mid",
+    "S-Curve",
+    "Reverse Ease",
+    "Slow Mo",
+    "Logarithmic"
+  ],
+  "Elastic": [
+    "Elastic In"
+  ],
+  "Bounce": [
+    "Bounce In"
+  ]
+}
