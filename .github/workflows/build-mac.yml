@@ -28,8 +28,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install SVG converter
+      - name: Install dependencies
         run: |
+          pip install --upgrade pip
+          pip install pyinstaller PySide6
           brew install librsvg
 
       - name: Build Mac app
