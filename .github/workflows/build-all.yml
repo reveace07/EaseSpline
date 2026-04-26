@@ -117,8 +117,26 @@ jobs:
           name: ESpline_Mac_${{ github.event.inputs.version }}
           path: ReveaceSpline_Windows/mac/ESpline_Mac.zip
 
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Package Linux zip
+        run: |
+          cd dist
+          zip -r ESpline_Linux.zip ESpline/
+          echo "Linux zip ready"
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESpline_Linux_${{ github.event.inputs.version }}
+          path: dist/ESpline_Linux.zip
+
   release:
-    needs: [build-windows, build-macos]
+    needs: [build-windows, build-macos, build-linux]
     runs-on: ubuntu-latest
     steps:
       - name: Download Windows artifacts
@@ -133,6 +151,12 @@ jobs:
           name: ESpline_Mac_${{ github.event.inputs.version }}
           path: ./mac
 
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ESpline_Linux_${{ github.event.inputs.version }}
+          path: ./linux
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
@@ -142,6 +166,7 @@ jobs:
             windows/ESpline.exe
             windows/ESpline_Setup.exe
             mac/ESpline_Mac.zip
+            linux/ESpline_Linux.zip
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

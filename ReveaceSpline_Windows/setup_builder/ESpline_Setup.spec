@@ -14,6 +14,7 @@ a = Analysis(
         (os.path.join(SRC, '..', 'ESpline', 'detector.py'), '.'),
         (os.path.join(SRC, '..', 'ESpline', 'debug_check.py'), '.'),
         (os.path.join(SRC, 'EaseSpline.py'), '.'),
+        (os.path.join(SRC, '..', 'ESpline', 'repair_tool.py'), '.'),
         (os.path.join(SRC, '..', '..', 'dist', 'ESpline.exe'), '.'),
         (os.path.join(SRC, 'espline_logo.ico'), '.'),
     ],

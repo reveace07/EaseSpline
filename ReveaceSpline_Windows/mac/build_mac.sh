@@ -25,9 +25,10 @@ echo "    OK"
 
 echo ""
 echo "[2/7] Copying app source files into bundle..."
-cp "$REPO_ROOT/ESpline/main.py" "$APP_DIR/Contents/Resources/app/"
-cp "$REPO_ROOT/ESpline/detector.py" "$APP_DIR/Contents/Resources/app/"
+cp "$REPO_ROOT/ESpline/main.py"        "$APP_DIR/Contents/Resources/app/"
+cp "$REPO_ROOT/ESpline/detector.py"    "$APP_DIR/Contents/Resources/app/"
 cp "$REPO_ROOT/ESpline/debug_check.py" "$APP_DIR/Contents/Resources/app/"
+cp "$REPO_ROOT/ESpline/repair_tool.py" "$APP_DIR/Contents/Resources/app/"
 cp -R "$REPO_ROOT/ESpline/reveace_pyside6/"* "$APP_DIR/Contents/Resources/app/reveace_pyside6/"
 echo "    OK"
 
@@ -127,18 +128,41 @@ cat > "$APP_DIR/Contents/MacOS/ESpline" <<'LAUNCHER'
 APP_NAME="Rev EaseSpline"
 BUNDLE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SRC_DIR="$BUNDLE_DIR/Resources/app"
+CONFIG_DIR="$HOME/Library/Application Support/ESpline"
 PYTHON_MIN_MAJOR=3
 PYTHON_MIN_MINOR=10
 
+mkdir -p "$CONFIG_DIR"
+
 # ── Find Python 3.10+ ──
 find_python() {
+    # Check saved Python path first (set on previous launch)
+    local saved="$CONFIG_DIR/python_path.txt"
+    if [ -f "$saved" ]; then
+        local saved_py
+        saved_py=$(cat "$saved")
+        if [ -f "$saved_py" ]; then
+            local ver
+            ver=$("$saved_py" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+            local major="${ver%%.*}"
+            local minor="${ver#*.}"
+            if [ "$major" -eq 3 ] && [ "$minor" -ge 10 ]; then
+                echo "$saved_py"
+                return 0
+            fi
+        fi
+    fi
+
     for cmd in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
         if command -v "$cmd" &> /dev/null; then
-            ver=$("$cmd" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
-            major=$(echo "$ver" | cut -d. -f1)
-            minor=$(echo "$ver" | cut -d. -f2)
+            local exe
+            exe=$(command -v "$cmd")
+            local ver
+            ver=$("$exe" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+            local major="${ver%%.*}"
+            local minor="${ver#*.}"
             if [ "$major" -eq 3 ] && [ "$minor" -ge 10 ]; then
-                command -v "$cmd"
+                echo "$exe"
                 return 0
             fi
         fi
@@ -148,34 +172,81 @@ find_python() {
 
 PYTHON=$(find_python)
 
-# ── No Python ──
+# ── No Python — auto-download and install the pkg, same as Windows ──
 if [ -z "$PYTHON" ]; then
-    osascript -e "display dialog \"$APP_NAME requires Python 3.10 or newer.\n\nClick 'Download' to get Python from python.org, then re-open $APP_NAME.\" buttons {\"Download Python\", \"Cancel\"} default button \"Download Python\" with icon stop"
-    if [ $? -eq 0 ]; then
-        open "https://www.python.org/downloads/macos/"
+    PYTHON_PKG_URL="https://www.python.org/ftp/python/3.11.9/python-3.11.9-macos11.pkg"
+    PYTHON_PKG="/tmp/python_espline_install.pkg"
+
+    result=$(osascript -e "display dialog \"$APP_NAME needs Python 3.11, which is not installed.\n\nClick 'Install Automatically' and Python will be downloaded and installed for you (~45 MB).\n\nYou may be asked for your Mac password.\" buttons {\"Install Automatically\", \"Cancel\"} default button \"Install Automatically\" with icon note" 2>/dev/null)
+    if ! echo "$result" | grep -q "Install Automatically"; then
+        exit 1
     fi
-    exit 1
+
+    # Download with curl — uses macOS system SSL so no cert issues
+    osascript -e "display dialog \"Downloading Python 3.11...\nThis will take a moment.\" giving up after 2" &>/dev/null
+    if ! curl -L --silent --show-error "$PYTHON_PKG_URL" -o "$PYTHON_PKG" 2>/tmp/espline_curl_err; then
+        osascript -e "display dialog \"Download failed.\n\nPlease check your internet connection and try again, or install Python manually from python.org.\" buttons {\"OK\"} with icon stop"
+        exit 1
+    fi
+
+    # Install silently — prompts for password once via macOS
+    if ! sudo installer -pkg "$PYTHON_PKG" -target / 2>/tmp/espline_install_err; then
+        osascript -e "display dialog \"Python installation failed.\n\nPlease install Python 3.11 manually from python.org, then re-open $APP_NAME.\" buttons {\"OK\"} with icon stop"
+        rm -f "$PYTHON_PKG"
+        exit 1
+    fi
+    rm -f "$PYTHON_PKG"
+
+    # Find the newly installed Python
+    PYTHON=$(find_python)
+    if [ -z "$PYTHON" ]; then
+        # python.org pkg installs to a versioned path
+        for p in /Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11 \
+                  /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12; do
+            if [ -f "$p" ]; then PYTHON="$p"; break; fi
+        done
+    fi
+
+    if [ -z "$PYTHON" ]; then
+        osascript -e "display dialog \"Python installed but could not be found.\n\nPlease re-open $APP_NAME.\" buttons {\"OK\"} with icon note"
+        exit 1
+    fi
+
+    osascript -e "display dialog \"Python installed successfully!\n\n$APP_NAME will now continue.\" buttons {\"OK\"} default button \"OK\" with icon note" &>/dev/null
+fi
+
+# Save Python path so next launch is instant
+echo "$PYTHON" > "$CONFIG_DIR/python_path.txt"
+
+# Drop repair tool into config dir so users can run it if something breaks
+cp "$SRC_DIR/repair_tool.py" "$CONFIG_DIR/repair_tool.py" 2>/dev/null || true
+
+# ── Fix SSL certificates (macOS Python from python.org ships without certs) ──
+# This was causing "not connected to internet" errors during pip installs and app use.
+"$PYTHON" -m pip install --quiet certifi 2>/dev/null || true
+SSL_CERT=$("$PYTHON" -c "import certifi; print(certifi.where())" 2>/dev/null || true)
+if [ -n "$SSL_CERT" ] && [ -f "$SSL_CERT" ]; then
+    export SSL_CERT_FILE="$SSL_CERT"
+    export REQUESTS_CA_BUNDLE="$SSL_CERT"
 fi
 
 # ── Check PySide6 ──
 if ! "$PYTHON" -c "from PySide6.QtWidgets import QApplication" 2>/dev/null; then
-    osascript -e "display dialog \"PySide6 is required but not installed.\n\nClick OK to install it now. This may take 2-3 minutes.\" buttons {\"Install Now\", \"Cancel\"} default button \"Install Now\" with icon note"
-    if [ $? -ne 0 ]; then
+    result=$(osascript -e "display dialog \"PySide6 is required but not installed.\n\nClick 'Install Now' to install it automatically. This may take 2-3 minutes.\" buttons {\"Install Now\", \"Cancel\"} default button \"Install Now\" with icon note" 2>/dev/null)
+    if ! echo "$result" | grep -q "Install Now"; then
         exit 1
     fi
 
-    # Show "installing" dialog
-    osascript -e "display dialog \"Installing PySide6...\nPlease wait, this window will close automatically.\" giving up after 1" &>/dev/null
-
-    # Install PySide6
+    # Install PySide6, retry with --trusted-host on SSL failure
     if ! "$PYTHON" -m pip install PySide6 2>/dev/null; then
-        osascript -e "display dialog \"Failed to install PySide6.\n\nPlease open Terminal and run:\n\npip3 install PySide6\n\nThen re-open $APP_NAME.\" buttons {\"OK\"} default button \"OK\" with icon stop"
-        exit 1
+        "$PYTHON" -m pip install PySide6 \
+            --trusted-host pypi.org \
+            --trusted-host files.pythonhosted.org 2>/dev/null || true
     fi
 
-    # Verify it worked
+    # Verify
     if ! "$PYTHON" -c "from PySide6.QtWidgets import QApplication" 2>/dev/null; then
-        osascript -e "display dialog \"PySide6 installation failed.\n\nPlease install manually in Terminal:\n\npip3 install PySide6\" buttons {\"OK\"} default button \"OK\" with icon stop"
+        osascript -e "display dialog \"PySide6 installation failed.\n\nPlease open Terminal and run:\n\npip3 install PySide6\n\nThen re-open $APP_NAME.\" buttons {\"OK\"} default button \"OK\" with icon stop"
         exit 1
     fi
 fi
@@ -185,7 +256,7 @@ export RESOLVE_SCRIPT_API="/Library/Application Support/Blackmagic Design/DaVinc
 export RESOLVE_SCRIPT_LIB="/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so"
 export PYTHONPATH="$SRC_DIR"
 
-# ── Launch app ──
+# ── Launch app (exec replaces shell so process is clean) ──
 exec "$PYTHON" "$SRC_DIR/main.py"
 LAUNCHER
 

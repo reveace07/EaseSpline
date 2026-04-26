@@ -207,6 +207,7 @@ def copy_app_files():
         ("detector.py", "."),
         ("debug_check.py", "."),
         ("EaseSpline.py", "."),
+        ("repair_tool.py", "."),
     ]
     for src_name, dst_sub in files_to_copy:
         src = resource_path(src_name)
