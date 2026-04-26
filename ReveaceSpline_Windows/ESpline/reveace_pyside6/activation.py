@@ -22,6 +22,9 @@ def _ssl_context():
         return ssl.create_default_context(cafile=certifi.where())
     except ImportError:
         pass
+    # macOS: default context often fails without certifi; use unverified
+    if platform.system() == "Darwin":
+        return ssl._create_unverified_context()
     try:
         ctx = ssl.create_default_context()
         return ctx
