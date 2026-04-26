@@ -135,6 +135,8 @@ PYTHON_MIN_MINOR=10
 mkdir -p "$CONFIG_DIR"
 
 # ── Find Python 3.10+ ──
+# .app bundles launched from Finder don't inherit the full Terminal PATH,
+# so Homebrew/pyenv Pythons are invisible via `command -v`. Check everywhere.
 find_python() {
     # Check saved Python path first (set on previous launch)
     local saved="$CONFIG_DIR/python_path.txt"
@@ -153,20 +155,69 @@ find_python() {
         fi
     fi
 
-    for cmd in python3.14 python3.13 python3.12 python3.11 python3.10 python3; do
-        if command -v "$cmd" &> /dev/null; then
+    # Build a candidate list: PATH names + every hardcoded location that
+    # Homebrew (Intel + Apple Silicon), python.org pkg, and pyenv use
+    local candidates=(
+        # PATH-based
+        python3.14 python3.13 python3.12 python3.11 python3.10 python3
+    )
+    local hardcoded=(
+        # Homebrew Apple Silicon
+        /opt/homebrew/bin/python3.14
+        /opt/homebrew/bin/python3.13
+        /opt/homebrew/bin/python3.12
+        /opt/homebrew/bin/python3.11
+        /opt/homebrew/bin/python3.10
+        /opt/homebrew/bin/python3
+        # Homebrew Intel
+        /usr/local/bin/python3.14
+        /usr/local/bin/python3.13
+        /usr/local/bin/python3.12
+        /usr/local/bin/python3.11
+        /usr/local/bin/python3.10
+        /usr/local/bin/python3
+        # python.org pkg installer
+        /Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14
+        /Library/Frameworks/Python.framework/Versions/3.13/bin/python3.13
+        /Library/Frameworks/Python.framework/Versions/3.12/bin/python3.12
+        /Library/Frameworks/Python.framework/Versions/3.11/bin/python3.11
+        /Library/Frameworks/Python.framework/Versions/3.10/bin/python3.10
+        # pyenv
+        "$HOME/.pyenv/shims/python3"
+        # MacPorts
+        /opt/local/bin/python3.12
+        /opt/local/bin/python3.11
+        /opt/local/bin/python3.10
+    )
+
+    is_good_python() {
+        local exe="$1"
+        [ -f "$exe" ] || return 1
+        local ver
+        ver=$("$exe" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
+        local major="${ver%%.*}"
+        local minor="${ver#*.}"
+        [ "$major" -eq 3 ] && [ "$minor" -ge 10 ]
+    }
+
+    # Check PATH-based names first
+    for cmd in "${candidates[@]}"; do
+        if command -v "$cmd" &>/dev/null; then
             local exe
             exe=$(command -v "$cmd")
-            local ver
-            ver=$("$exe" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null)
-            local major="${ver%%.*}"
-            local minor="${ver#*.}"
-            if [ "$major" -eq 3 ] && [ "$minor" -ge 10 ]; then
-                echo "$exe"
-                return 0
+            if is_good_python "$exe"; then
+                echo "$exe"; return 0
             fi
         fi
     done
+
+    # Then check hardcoded paths (catches Homebrew/pyenv hidden from .app PATH)
+    for exe in "${hardcoded[@]}"; do
+        if is_good_python "$exe"; then
+            echo "$exe"; return 0
+        fi
+    done
+
     return 1
 }
 
@@ -183,15 +234,15 @@ if [ -z "$PYTHON" ]; then
     fi
 
     # Download with curl — uses macOS system SSL so no cert issues
-    osascript -e "display dialog \"Downloading Python 3.11...\nThis will take a moment.\" giving up after 2" &>/dev/null
     if ! curl -L --silent --show-error "$PYTHON_PKG_URL" -o "$PYTHON_PKG" 2>/tmp/espline_curl_err; then
-        osascript -e "display dialog \"Download failed.\n\nPlease check your internet connection and try again, or install Python manually from python.org.\" buttons {\"OK\"} with icon stop"
+        osascript -e "display dialog \"Download failed.\n\nPlease check your internet connection and try again.\" buttons {\"OK\"} with icon stop"
         exit 1
     fi
 
-    # Install silently — prompts for password once via macOS
-    if ! sudo installer -pkg "$PYTHON_PKG" -target / 2>/tmp/espline_install_err; then
-        osascript -e "display dialog \"Python installation failed.\n\nPlease install Python 3.11 manually from python.org, then re-open $APP_NAME.\" buttons {\"OK\"} with icon stop"
+    # Install via osascript so macOS shows the password dialog properly
+    # (sudo doesn't work from inside a .app bundle — no terminal to prompt)
+    if ! osascript -e "do shell script \"installer -pkg '$PYTHON_PKG' -target /\" with administrator privileges" 2>/tmp/espline_install_err; then
+        osascript -e "display dialog \"Python installation failed.\n\nError: $(cat /tmp/espline_install_err | head -1)\n\nPlease install Python 3.11 from python.org manually, then re-open $APP_NAME.\" buttons {\"OK\"} with icon stop"
         rm -f "$PYTHON_PKG"
         exit 1
     fi
